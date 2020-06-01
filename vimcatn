@@ -1,0 +1,200 @@
+#!/bin/sh
+#!/usr/bin/env vim
+#! This is a shell script that executes itself as a vimscript to do its work
+
+: if 0
+	: "Bourne shell code goes here, but you cannot use if-statements"
+	case "$0" in
+	/*) script="$0" ;;
+	 *) script="$PWD/$0"
+	esac
+	export line_offset=0
+	[ $# -lt 1 -o "$1" = "-" ] && {
+		tmpfile=$( mktemp -t "${0##*/}.XXXXXXXX" )
+		trap 'rm -f "$tmpfile"' EXIT
+		eval 'cat > "$tmpfile" || exit'
+		[ $# -gt 0 ] && shift 1 # -
+		set -- "$tmpfile" "$@"
+		case "${UNAME_s:=$( uname -s )}" in
+		Darwin) line_offset=1 ;;
+		esac
+	}
+	vim -e -X -R "$@" -c "source $script" -c visual \
+		-c "bufdo call AnsiHighlight()" -c qa < /dev/tty | sed -e ''
+	exit
+: endif
+
+"""
+""" The remainder of this file is vimscript
+"""
+
+" AnsiHighlight:  Allows for marking up a file, using ANSI color escapes when
+"                 the syntax changes colors, for easy, faithful reproduction.
+" Author:         Matthew Wozniski (mjw@drexel.edu)
+" Date:           Tue, 6 Nov 2018 20:21:25 -0800
+" Version:        1.0
+" History:        FIXME see :help marklines-history
+" License:        BSD 3-Clause. Below copyright/license must be replicated.
+
+" Copyright (c) 2008, Matthew J. Wozniski                                {{{1
+" Copyright (c) 2017-2018, Devin E. Teske <dteske@FreeBSD.org>
+" All rights reserved.
+" 
+" Redistribution and use in source and binary forms, with or without
+" modification, are permitted provided that the following conditions are met:
+"     * Redistributions of source code must retain the above copyright
+"       notice, this list of conditions and the following disclaimer.
+"     * Redistributions in binary form must reproduce the above copyright
+"       notice, this list of conditions and the following disclaimer in the
+"       documentation and/or other materials provided with the distribution.
+"     * The names of the contributors may not be used to endorse or promote
+"       products derived from this software without specific prior written
+"       permission.
+" 
+" THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER ``AS IS'' AND ANY
+" EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+" WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+" DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY
+" DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+" (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+" LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+" ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+" SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+" Turn off vi-compatible mode, unless it's already off                   {{{1
+if &cp
+  set nocp
+endif
+let v:statusmsg = 'xxx'
+
+let s:type = 'cterm'
+if &t_Co == 0
+  let s:type = 'term'
+endif
+
+" Converts info for a highlight group to a string of ANSI color escapes  {{{1
+function! s:GroupToAnsi(groupnum)
+  if ! exists("s:ansicache")
+    let s:ansicache = {}
+  endif
+
+  let groupnum = a:groupnum
+
+  if groupnum == 0
+    let groupnum = hlID('Normal')
+  endif
+
+  if has_key(s:ansicache, groupnum)
+    return s:ansicache[groupnum]
+  endif
+
+  let fg = synIDattr(groupnum, 'fg', s:type)
+  let bg = synIDattr(groupnum, 'bg', s:type)
+  let rv = synIDattr(groupnum, 'reverse', s:type)
+  let bd = synIDattr(groupnum, 'bold', s:type)
+
+  " FIXME other attributes?
+
+  if rv == "" || rv == -1
+    let rv = 0
+  endif
+
+  if bd == "" || bd == -1
+    let bd = 0
+  endif
+
+  if rv
+    let temp = bg
+    let bg = fg
+    let fg = temp
+  endif
+
+  if fg >= 8 && fg < 16
+    let fg -= 8
+    let bd = 1
+  endif
+
+  if fg == "" || fg == -1
+    unlet fg
+  endif
+
+  if !exists('fg') && !groupnum == hlID('Normal')
+    let fg = synIDattr(hlID('Normal'), 'fg', s:type)
+    if fg == "" || fg == -1
+      unlet fg
+    endif
+  endif
+
+  if bg == "" || bg == -1
+    unlet bg
+  endif
+
+  if !exists('bg') && !groupnum == hlID('Normal')
+    let bg = synIDattr(hlID('Normal'), 'bg', s:type)
+    if bg == "" || bg == -1
+      unlet bg
+    endif
+  endif
+
+  let retv = "\<Esc>[0"
+
+  if bd
+    let retv .= ";1"
+  endif
+
+  if exists('fg') && fg < 8
+    let retv .= ";3" . fg
+  elseif exists('fg')
+    let retv .= ";38;5;" . fg
+  endif
+
+  if exists('bg') && bg < 8
+    let retv .= ";4" . bg
+  elseif exists('bg')
+    let retv .= ";48;5;" . bg
+  endif
+
+  let retv .= "m"
+
+  let s:ansicache[groupnum] = retv
+
+  return retv
+endfunction
+
+function! AnsiHighlight()
+  let retv = []
+
+  let LineNr = hlID('LineNr')
+  let llen = strlen(line('$'))
+  for lnum in range(1, line('$') + $line_offset)
+    let last = hlID('Normal')
+    let output = "\<Esc>[K" " Clear to right
+
+    " Hopefully fix highlighting sync issues
+    exe "norm! " . lnum . "G$"
+
+    let line = getline(lnum)
+    let output .= s:GroupToAnsi(LineNr) . printf("%*u ", llen, lnum)
+    let output .= s:GroupToAnsi(last)
+
+    for cnum in range(1, col('.'))
+      if synIDtrans(synID(lnum, cnum, 1)) != last
+        let last = synIDtrans(synID(lnum, cnum, 1))
+        let output .= s:GroupToAnsi(last)
+      endif
+
+      let output .= matchstr(line, '\%(\zs.\)\{'.cnum.'}')
+      "let line = substitute(line, '.', '', '')
+      "let line = matchstr(line, '^\@<!.*')
+    endfor
+
+    let retv += ["\r" . output]
+  endfor
+
+  " Reset the colors to default after displaying the file
+  let retv[-1] .= "\<Esc>[0m"
+
+  echo ""
+  return writefile([""] + retv, '/dev/stdout', 'b')
+endfunction
